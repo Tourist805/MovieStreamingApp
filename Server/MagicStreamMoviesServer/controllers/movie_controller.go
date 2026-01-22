@@ -6,17 +6,20 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Tourist805/MovieStreamingApp/Server/MagicStreamMoviesServer/database"
 	"github.com/Tourist805/MovieStreamingApp/Server/MagicStreamMoviesServer/models"
+	"github.com/Tourist805/MovieStreamingApp/Server/MagicStreamMoviesServer/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"github.com/joho/godotenv"
 	"github.com/tmc/langchaingo/llms/openai"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 var (
@@ -150,7 +153,7 @@ func AdminReviewUpdate() gin.HandlerFunc {
 			return
 		}
 
-		sentiment, rankValue, err := GetReviewRanking(req.AdminReview)
+		sentiment, rankValue, err := getReviewRanking(req.AdminReview)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error getting review ranking"})
 			return
@@ -188,8 +191,8 @@ func AdminReviewUpdate() gin.HandlerFunc {
 	}
 }
 
-func GetReviewRanking(admin_review string) (string, int, error) {
-	rankings, err := GetRankings()
+func getReviewRanking(admin_review string) (string, int, error) {
+	rankings, err := getRankings()
 	if err != nil {
 		return "", 0, err
 	}
@@ -241,7 +244,7 @@ func GetReviewRanking(admin_review string) (string, int, error) {
 	return response, rankVal, nil
 }
 
-func GetRankings() ([]models.Ranking, error) {
+func getRankings() ([]models.Ranking, error) {
 	var rankings []models.Ranking
 
 	var ctx, cancel = context.WithTimeout(context.Background(), 100*time.Second)
@@ -264,4 +267,109 @@ func GetRankings() ([]models.Ranking, error) {
 	}
 
 	return rankings, nil
+}
+
+func GetRecommendedMovies() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userId, err := utils.GetUserIdFromContext(c)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "User Id not found in context"})
+			return
+		}
+
+		favourite_genres, err := getUsersFavouriteGenres(userId)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		err = godotenv.Load(".env")
+		if err != nil {
+			log.Println("Warning: .env file not found")
+		}
+
+		var recommendedMovieLimitVal int64 = 5
+
+		recommendedMovieLimitStr := os.Getenv("RECOMMENDED_MOVIE_LIMIT")
+
+		if recommendedMovieLimitStr != "" {
+			recommendedMovieLimitVal, err = strconv.ParseInt(recommendedMovieLimitStr, 10, 64)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to parse int value"})
+				return
+			}
+		}
+
+		findOptions := options.Find()
+		findOptions.SetSort(bson.D{{Key: "ranking.ranking_value", Value: 1}})
+
+		findOptions.SetLimit(recommendedMovieLimitVal)
+
+		filter := bson.M{"genre.genre_name": bson.M{"$in": favourite_genres}}
+
+		var ctx, cancel = context.WithTimeout(context.Background(), 100*time.Second)
+		defer cancel()
+
+		cursor, err := movieCollection.Find(ctx, filter, findOptions)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching recommended movie"})
+			return
+		}
+
+		defer func(cursor *mongo.Cursor, ctx context.Context) {
+			err := cursor.Close(ctx)
+			if err != nil {
+				log.Println("Failed to close cursor:", err)
+			}
+		}(cursor, ctx)
+
+		var recommendedMovies []models.Movie
+		if err := cursor.All(ctx, &recommendedMovies); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, recommendedMovies)
+	}
+}
+
+func getUsersFavouriteGenres(userId string) ([]string, error) {
+	var ctx, cancel = context.WithTimeout(context.Background(), 100*time.Second)
+	defer cancel()
+
+	filter := bson.M{"user_id": userId}
+	projection := bson.M{
+		"favourite_genres.genre_name": 1,
+		"_id":                         0,
+	}
+
+	opts := options.FindOne().SetProjection(projection)
+	var result bson.M
+
+	err := userCollection.FindOne(ctx, filter, opts).Decode(&result)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return []string{}, nil
+		}
+	}
+
+	favGenresArray, ok := result["favourite_genres"].(bson.A)
+	if !ok {
+		return []string{}, errors.New("unable to retrieve favourite genres for user")
+	}
+
+	var genreNames []string
+	for _, item := range favGenresArray {
+		if genreMap, ok := item.(bson.D); ok {
+			for _, elem := range genreMap {
+				if elem.Key == "genre_name" {
+					if name, ok := elem.Value.(string); ok {
+						genreNames = append(genreNames, name)
+					}
+				}
+			}
+		}
+	}
+
+	return genreNames, nil
 }
