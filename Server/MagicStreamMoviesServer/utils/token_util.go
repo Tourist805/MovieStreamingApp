@@ -23,11 +23,10 @@ type SignedDetails struct {
 }
 
 var (
-	SECRET_KEY                        string            = os.Getenv("SECRET_KEY")
-	SECRET_REFRESH_KEY                string            = os.Getenv("SECRET_REFRESH_KEY")
-	userCollection                    *mongo.Collection = database.OpenCollection("users")
-	expireTimeoutDurationToken                          = 24 * time.Hour
-	expireTimeoutDurationRefreshToken                   = 24 * 7 * time.Hour
+	SECRET_KEY                        string = os.Getenv("SECRET_KEY")
+	SECRET_REFRESH_KEY                string = os.Getenv("SECRET_REFRESH_KEY")
+	expireTimeoutDurationToken               = 24 * time.Hour
+	expireTimeoutDurationRefreshToken        = 24 * 7 * time.Hour
 )
 
 func GenerateAllTokens(email, firstName, lastName, role, userId string) (string, string, error) {
@@ -63,7 +62,7 @@ func generateTokenUnsigned(email, firstName, lastName, role, userId string, expi
 	return token
 }
 
-func UpdateAllTokens(userId, token, refreshToken string) (err error) {
+func UpdateAllTokens(userId, token, refreshToken string, client *mongo.Client) (err error) {
 	var ctx, cancel = context.WithTimeout(context.Background(), 100*time.Second)
 	defer cancel()
 
@@ -80,6 +79,7 @@ func UpdateAllTokens(userId, token, refreshToken string) (err error) {
 		},
 	}
 
+	var userCollection *mongo.Collection = database.OpenCollection("users", client)
 	_, err = userCollection.UpdateOne(ctx, bson.M{"user_id": userId}, updateData)
 	if err != nil {
 		return err
@@ -137,4 +137,18 @@ func GetUserIdFromContext(c *gin.Context) (string, error) {
 	}
 
 	return id, nil
+}
+
+func GetRoleFromContext(c *gin.Context) (string, error) {
+	role, exists := c.Get("role")
+	if !exists {
+		return "", errors.New("userId does not exists in this context")
+	}
+
+	memberRole, ok := role.(string)
+	if !ok {
+		return "", errors.New("unable to retrieve userId")
+	}
+
+	return memberRole, nil
 }
